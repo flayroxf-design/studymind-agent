@@ -150,7 +150,7 @@ function isStatsRequest(text) {
 }
 
 function isReportRequest(text) {
-  const keywords = ['rapport', 'rapport mensuel', 'rapport du mois', 'paiements du mois', 'liste des abonnés'];
+  const keywords = ['rapport mensuel', 'rapport du mois', 'paiements du mois', 'liste des abonnés', 'liste des paiements'];
   return keywords.some(k => text.toLowerCase().includes(k));
 }
 
