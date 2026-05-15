@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
 const Stripe = require('stripe');
+const { Pool } = require('pg');
 
 const client = new Client({
   intents: [
@@ -13,6 +14,7 @@ const client = new Client({
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const conversations = new Map();
 
 async function getStripeStats() {
@@ -40,8 +42,26 @@ async function getStripeStats() {
   };
 }
 
+async function getDbStats() {
+  const [totalRes, planRes, newTodayRes] = await Promise.all([
+    db.query('SELECT COUNT(*) as count FROM "User"'),
+    db.query('SELECT plan, COUNT(*) as count FROM "User" GROUP BY plan'),
+    db.query(`SELECT COUNT(*) as count FROM "User" WHERE "createdAt" >= CURRENT_DATE`),
+  ]);
+
+  const plans = {};
+  planRes.rows.forEach(row => { plans[row.plan] = parseInt(row.count); });
+
+  return {
+    totalUsers: parseInt(totalRes.rows[0].count),
+    newToday: parseInt(newTodayRes.rows[0].count),
+    freeUsers: plans['free'] ?? 0,
+    premiumUsers: plans['premium'] ?? 0,
+  };
+}
+
 function isStatsRequest(text) {
-  const keywords = ['stats', 'stat ', 'abonnement', 'revenu', 'mrr', 'chiffre', 'combien', 'subscri'];
+  const keywords = ['stats', 'stat ', 'abonnement', 'revenu', 'mrr', 'chiffre', 'combien', 'subscri', 'utilisateur', 'user', 'inscrit', 'visite'];
   return keywords.some(k => text.toLowerCase().includes(k));
 }
 
@@ -50,6 +70,7 @@ StudyMind est un SaaS edtech français (tuteur IA + planning + flashcards) pour 
 
 Tes capacités :
 - Donner les stats Stripe en temps réel (abonnements actifs, nouveaux du jour, MRR, clients)
+- Donner les stats utilisateurs en temps réel (inscrits total, free vs premium, nouveaux du jour)
 - Envoyer des emails au nom de Raphaël
 - Conseiller sur le business, marketing, product
 
@@ -74,8 +95,21 @@ client.on('messageCreate', async (message) => {
     let userContent = message.content;
 
     if (isStatsRequest(message.content)) {
-      const stats = await getStripeStats();
-      userContent = `${message.content}\n\n[DONNÉES STRIPE EN TEMPS RÉEL]\n- Abonnements actifs : ${stats.activeSubscriptions}\n- Nouveaux aujourd'hui : ${stats.newToday}\n- MRR : ${stats.mrr} €\n- Total clients : ${stats.totalCustomers}`;
+      const [stripe, db] = await Promise.all([getStripeStats(), getDbStats()]);
+      userContent = `${message.content}
+
+[DONNÉES EN TEMPS RÉEL]
+Stripe :
+- Abonnements actifs : ${stripe.activeSubscriptions}
+- Nouveaux aujourd'hui : ${stripe.newToday}
+- MRR : ${stripe.mrr} €
+- Total clients Stripe : ${stripe.totalCustomers}
+
+Base de données :
+- Total utilisateurs inscrits : ${db.totalUsers}
+- Nouveaux inscrits aujourd'hui : ${db.newToday}
+- Plan free : ${db.freeUsers}
+- Plan premium : ${db.premiumUsers}`;
     }
 
     history.push({ role: 'user', content: userContent });
