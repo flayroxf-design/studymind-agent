@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
 const Stripe = require('stripe');
 const { Pool } = require('pg');
+const cron = require('node-cron');
 
 const client = new Client({
   intents: [
@@ -60,8 +61,96 @@ async function getDbStats() {
   };
 }
 
+async function getMonthlyPayments(year, month) {
+  const startOfMonth = Math.floor(new Date(year, month, 1).getTime() / 1000);
+  const startOfNextMonth = Math.floor(new Date(year, month + 1, 1).getTime() / 1000);
+
+  const invoices = await stripe.invoices.list({
+    status: 'paid',
+    created: { gte: startOfMonth, lt: startOfNextMonth },
+    limit: 100,
+  });
+
+  const payments = [];
+  for (const invoice of invoices.data) {
+    const customerId = typeof invoice.customer === 'string' ? invoice.customer : invoice.customer?.id;
+    if (!customerId || !invoice.amount_paid) continue;
+
+    const customer = await stripe.customers.retrieve(customerId);
+    const stripeName = customer.name || '';
+
+    const result = await db.query(
+      'SELECT "firstName", email, "planInterval" FROM "User" WHERE "stripeCustomerId" = $1',
+      [customerId]
+    );
+
+    const dbUser = result.rows[0];
+    const email = dbUser?.email || customer.email || 'N/A';
+    const firstName = dbUser?.firstName || stripeName || 'N/A';
+    const planInterval = dbUser?.planInterval;
+
+    payments.push({
+      name: stripeName || firstName,
+      email,
+      plan: planInterval === 'year' ? 'Annuel' : 'Mensuel',
+      amount: (invoice.amount_paid / 100).toFixed(2),
+    });
+  }
+
+  return payments;
+}
+
+async function sendMonthlyReport(channel, year, month) {
+  const targetDate = new Date(year, month, 1);
+  const monthName = targetDate.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+
+  try {
+    const payments = await getMonthlyPayments(year, month);
+
+    if (payments.length === 0) {
+      await channel.send(`📊 **Rapport mensuel — ${monthName}**\n\nAucun paiement enregistré ce mois-ci.`);
+      return;
+    }
+
+    const total = payments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+
+    let message = `📊 **Rapport mensuel — ${monthName}**\n`;
+    message += `**${payments.length} paiement(s) :**\n\n`;
+
+    payments.forEach((p, i) => {
+      message += `${i + 1}. **${p.name}** | ${p.email} | ${p.plan} | ${p.amount} €\n`;
+    });
+
+    message += `\n💰 **Total encaissé : ${total.toFixed(2)} €**`;
+
+    if (message.length > 2000) {
+      const lines = message.split('\n');
+      let current = '';
+      for (const line of lines) {
+        if ((current + '\n' + line).length > 1900) {
+          if (current) await channel.send(current.trim());
+          current = line;
+        } else {
+          current = current ? current + '\n' + line : line;
+        }
+      }
+      if (current) await channel.send(current.trim());
+    } else {
+      await channel.send(message);
+    }
+  } catch (error) {
+    console.error('[Rapport mensuel]', error);
+    await channel.send('❌ Erreur lors de la génération du rapport mensuel.');
+  }
+}
+
 function isStatsRequest(text) {
   const keywords = ['stats', 'stat ', 'abonnement', 'revenu', 'mrr', 'chiffre', 'combien', 'subscri', 'utilisateur', 'user', 'inscrit', 'visite'];
+  return keywords.some(k => text.toLowerCase().includes(k));
+}
+
+function isReportRequest(text) {
+  const keywords = ['rapport', 'rapport mensuel', 'rapport du mois', 'paiements du mois', 'liste des abonnés'];
   return keywords.some(k => text.toLowerCase().includes(k));
 }
 
@@ -71,7 +160,7 @@ StudyMind est un SaaS edtech français (tuteur IA + planning + flashcards) pour 
 Tes capacités :
 - Donner les stats Stripe en temps réel (abonnements actifs, nouveaux du jour, MRR, clients)
 - Donner les stats utilisateurs en temps réel (inscrits total, free vs premium, nouveaux du jour)
-- Envoyer des emails au nom de Raphaël
+- Générer le rapport mensuel des paiements (nom, email, type d'abonnement)
 - Conseiller sur le business, marketing, product
 
 Règles :
@@ -82,6 +171,18 @@ Règles :
 
 client.on('clientReady', () => {
   console.log(`✅ Agent Principal connecté : ${client.user.tag}`);
+
+  // Rapport automatique le 1er de chaque mois à 8h00
+  cron.schedule('0 8 1 * *', async () => {
+    const now = new Date();
+    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    try {
+      const channel = await client.channels.fetch(process.env.AGENT_CHANNEL_ID);
+      if (channel) await sendMonthlyReport(channel, prevMonth.getFullYear(), prevMonth.getMonth());
+    } catch (err) {
+      console.error('[Cron rapport mensuel]', err);
+    }
+  }, { timezone: 'Europe/Paris' });
 });
 
 client.on('messageCreate', async (message) => {
@@ -92,24 +193,31 @@ client.on('messageCreate', async (message) => {
   await message.channel.sendTyping();
 
   try {
+    // Rapport mensuel manuel
+    if (isReportRequest(message.content)) {
+      const now = new Date();
+      await sendMonthlyReport(message.channel, now.getFullYear(), now.getMonth());
+      return;
+    }
+
     let userContent = message.content;
 
     if (isStatsRequest(message.content)) {
-      const [stripe, db] = await Promise.all([getStripeStats(), getDbStats()]);
+      const [stripeStats, dbStats] = await Promise.all([getStripeStats(), getDbStats()]);
       userContent = `${message.content}
 
 [DONNÉES EN TEMPS RÉEL]
 Stripe :
-- Abonnements actifs : ${stripe.activeSubscriptions}
-- Nouveaux aujourd'hui : ${stripe.newToday}
-- MRR : ${stripe.mrr} €
-- Total clients Stripe : ${stripe.totalCustomers}
+- Abonnements actifs : ${stripeStats.activeSubscriptions}
+- Nouveaux aujourd'hui : ${stripeStats.newToday}
+- MRR : ${stripeStats.mrr} €
+- Total clients Stripe : ${stripeStats.totalCustomers}
 
 Base de données :
-- Total utilisateurs inscrits : ${db.totalUsers}
-- Nouveaux inscrits aujourd'hui : ${db.newToday}
-- Plan free : ${db.freeUsers}
-- Plan premium : ${db.premiumUsers}`;
+- Total utilisateurs inscrits : ${dbStats.totalUsers}
+- Nouveaux inscrits aujourd'hui : ${dbStats.newToday}
+- Plan free : ${dbStats.freeUsers}
+- Plan premium : ${dbStats.premiumUsers}`;
     }
 
     history.push({ role: 'user', content: userContent });
