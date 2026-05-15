@@ -280,7 +280,7 @@ Base de données :
 
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 600,
+      max_tokens: 2000,
       system: SYSTEM_PROMPT,
       messages: history,
     });
@@ -288,20 +288,43 @@ Base de données :
     const reply = response.content[0].text;
     history.push({ role: 'assistant', content: reply });
 
-    if (reply.length > 2000) {
-      const paragraphs = reply.split('\n\n');
-      let current = '';
-      for (const para of paragraphs) {
-        if ((current + '\n\n' + para).length > 1900) {
-          if (current) await message.reply(current.trim());
-          current = para;
+    // Découpe en chunks de 1900 chars max en respectant les sauts de paragraphe
+    const chunks = [];
+    const paragraphs = reply.split('\n\n');
+    let current = '';
+    for (const para of paragraphs) {
+      const candidate = current ? current + '\n\n' + para : para;
+      if (candidate.length > 1900) {
+        if (current) chunks.push(current.trim());
+        // Si le paragraphe seul dépasse 1900, le découper par lignes
+        if (para.length > 1900) {
+          const lines = para.split('\n');
+          let block = '';
+          for (const line of lines) {
+            if ((block + '\n' + line).length > 1900) {
+              if (block) chunks.push(block.trim());
+              block = line;
+            } else {
+              block = block ? block + '\n' + line : line;
+            }
+          }
+          current = block;
         } else {
-          current = current ? current + '\n\n' + para : para;
+          current = para;
         }
+      } else {
+        current = candidate;
       }
-      if (current) await message.reply(current.trim());
-    } else {
-      await message.reply(reply);
+    }
+    if (current) chunks.push(current.trim());
+
+    // Envoi : premier chunk en reply, les suivants en message normal pour éviter le spam de mentions
+    for (let i = 0; i < chunks.length; i++) {
+      if (i === 0) {
+        await message.reply(chunks[i]);
+      } else {
+        await message.channel.send(chunks[i]);
+      }
     }
 
   } catch (error) {
