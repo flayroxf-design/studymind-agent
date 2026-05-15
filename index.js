@@ -127,8 +127,17 @@ Base de données :
     history.push({ role: 'assistant', content: reply });
 
     if (reply.length > 2000) {
-      const chunks = reply.match(/.{1,2000}/gs);
-      for (const chunk of chunks) await message.reply(chunk);
+      const paragraphs = reply.split('\n\n');
+      let current = '';
+      for (const para of paragraphs) {
+        if ((current + '\n\n' + para).length > 1900) {
+          if (current) await message.reply(current.trim());
+          current = para;
+        } else {
+          current = current ? current + '\n\n' + para : para;
+        }
+      }
+      if (current) await message.reply(current.trim());
     } else {
       await message.reply(reply);
     }
