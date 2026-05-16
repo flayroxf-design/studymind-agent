@@ -4,6 +4,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const Stripe = require('stripe');
 const { Pool } = require('pg');
 const cron = require('node-cron');
+const { google } = require('googleapis');
 
 const client = new Client({
   intents: [
@@ -17,6 +18,74 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const conversations = new Map();
+
+// ─── Google Calendar setup ────────────────────────────────────────────────────
+
+function getCalendarClient() {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/calendar'],
+  });
+  return google.calendar({ version: 'v3', auth });
+}
+
+async function createCalendarEvent(summary, description, dateISO) {
+  const calendar = getCalendarClient();
+  const calendarId = process.env.GOOGLE_CALENDAR_ID;
+
+  // Parse the date — if time not specified, default to 9:00 AM Paris time
+  const start = new Date(dateISO);
+  if (isNaN(start.getTime())) throw new Error('Date invalide : ' + dateISO);
+
+  // All-day event if dateISO is just a date (YYYY-MM-DD), timed event otherwise
+  const isAllDay = /^\d{4}-\d{2}-\d{2}$/.test(dateISO.trim());
+
+  let eventBody;
+  if (isAllDay) {
+    const endDate = new Date(start);
+    endDate.setDate(endDate.getDate() + 1);
+    eventBody = {
+      summary,
+      description,
+      start: { date: dateISO.trim() },
+      end: { date: endDate.toISOString().slice(0, 10) },
+    };
+  } else {
+    const endTime = new Date(start.getTime() + 60 * 60 * 1000); // +1h
+    eventBody = {
+      summary,
+      description,
+      start: { dateTime: start.toISOString(), timeZone: 'Europe/Paris' },
+      end: { dateTime: endTime.toISOString(), timeZone: 'Europe/Paris' },
+    };
+  }
+
+  const res = await calendar.events.insert({ calendarId, requestBody: eventBody });
+  return res.data;
+}
+
+async function getEventsForDate(targetDate) {
+  const calendar = getCalendarClient();
+  const calendarId = process.env.GOOGLE_CALENDAR_ID;
+
+  const startOfDay = new Date(targetDate);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(targetDate);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const res = await calendar.events.list({
+    calendarId,
+    timeMin: startOfDay.toISOString(),
+    timeMax: endOfDay.toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime',
+  });
+
+  return res.data.items || [];
+}
+
+// ─── Stripe helpers ───────────────────────────────────────────────────────────
 
 async function getStripeStats() {
   const now = Math.floor(Date.now() / 1000);
@@ -144,6 +213,8 @@ async function sendMonthlyReport(channel, year, month) {
   }
 }
 
+// ─── Intent detection ─────────────────────────────────────────────────────────
+
 function isStatsRequest(text) {
   const keywords = ['stats', 'stat ', 'abonnement', 'revenu', 'mrr', 'chiffre', 'combien', 'subscri', 'utilisateur', 'user', 'inscrit', 'visite'];
   return keywords.some(k => text.toLowerCase().includes(k));
@@ -154,6 +225,85 @@ function isReportRequest(text) {
   return keywords.some(k => text.toLowerCase().includes(k));
 }
 
+function isReminderRequest(text) {
+  const keywords = [
+    'rappelle', 'rappel', 'n\'oublie pas', 'note que', 'ajoute au calendrier',
+    'souviens', 'mémorise', 'mets dans le calendrier', 'planifie',
+    'dans une semaine', 'la semaine prochaine', 'lundi prochain', 'mardi prochain',
+    'mercredi prochain', 'jeudi prochain', 'vendredi prochain', 'demain', 'dans',
+    'reminder', 'agenda', 'calendrier'
+  ];
+  return keywords.some(k => text.toLowerCase().includes(k));
+}
+
+// ─── Reminder parsing via Claude ──────────────────────────────────────────────
+
+async function extractReminderDetails(userMessage) {
+  const today = new Date().toLocaleDateString('fr-FR', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 300,
+    system: `Tu es un assistant qui extrait des informations de rappel depuis des messages en français.
+Aujourd'hui nous sommes : ${today}.
+Tu dois retourner UNIQUEMENT un JSON valide (rien d'autre) avec ce format :
+{
+  "summary": "Titre court du rappel (10 mots max)",
+  "description": "Description complète du rappel",
+  "date": "YYYY-MM-DD"
+}
+Si tu ne peux pas déterminer une date précise, utilise la date de la semaine prochaine (dans 7 jours).
+Ne retourne QUE le JSON, sans markdown, sans explication.`,
+    messages: [{ role: 'user', content: userMessage }],
+  });
+
+  const raw = response.content[0].text.trim();
+  return JSON.parse(raw);
+}
+
+// ─── Calendar reminder daily cron ────────────────────────────────────────────
+
+async function sendDailyReminders() {
+  const channelId = process.env.CALENDRIER_CHANNEL_ID;
+  if (!channelId || !process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_CALENDAR_ID) return;
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) return;
+
+    const today = new Date();
+    const events = await getEventsForDate(today);
+
+    if (events.length === 0) return; // Rien aujourd'hui, pas de message
+
+    const dayLabel = today.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+
+    let message = `📅 **Rappels du ${dayLabel}**\n\n`;
+
+    for (const event of events) {
+      const time = event.start?.dateTime
+        ? new Date(event.start.dateTime).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+        : null;
+
+      message += `**${time ? `🕐 ${time} — ` : '📌 '}${event.summary}**`;
+      if (event.description) {
+        message += `\n${event.description}`;
+      }
+      message += '\n\n';
+    }
+
+    message += `_${events.length} rappel${events.length > 1 ? 's' : ''} aujourd'hui_`;
+
+    await channel.send(message.trim());
+  } catch (err) {
+    console.error('[Daily reminders]', err);
+  }
+}
+
+// ─── System prompt ────────────────────────────────────────────────────────────
+
 const SYSTEM_PROMPT = `Tu es l'agent principal de StudyMind, le co-chef de Raphaël.
 StudyMind est un SaaS edtech français (tuteur IA + planning + flashcards) pour les élèves de la 6ème au Bac.
 
@@ -163,6 +313,20 @@ Tes capacités :
 - Générer le rapport mensuel des paiements (nom, email, type d'abonnement)
 - Conseiller sur le business, marketing, product
 - Générer des scripts TikTok optimisés pour StudyMind (demande "génère un script tiktok" ou "idée vidéo")
+- Créer des rappels dans Google Calendar (dis "rappelle-moi de...", "note que...", "dans X jours...")
+
+--- RAPPELS & CALENDRIER ---
+
+Quand Raphaël demande de noter ou rappeler quelque chose, tu crées automatiquement un événement dans son Google Calendar.
+Les rappels sont envoyés chaque matin à 9h dans le salon #calendrier.
+
+Exemples de demandes de rappel que tu gères :
+- "Rappelle-moi de relancer ce créateur lundi prochain"
+- "Note que je dois envoyer ma facture dans 3 jours"
+- "Dans une semaine, je dois appeler mon comptable"
+- "Ajoute dans le calendrier : réunion Stripe vendredi"
+
+Quand tu crées un rappel, confirme à Raphaël : la date, le titre du rappel, et dis-lui qu'il recevra un message dans #calendrier ce matin-là.
 
 --- CONNAISSANCE TIKTOK STUDYMIND ---
 
@@ -223,10 +387,12 @@ Règles :
 - Tutoie Raphaël
 - Si tu ne peux pas faire quelque chose, dis-le honnêtement`;
 
+// ─── Discord events ───────────────────────────────────────────────────────────
+
 client.on('clientReady', () => {
   console.log(`✅ Agent Principal connecté : ${client.user.tag}`);
 
-  // Rapport automatique le 1er de chaque mois à 8h00
+  // Rapport mensuel automatique le 1er de chaque mois à 8h00
   cron.schedule('0 8 1 * *', async () => {
     const now = new Date();
     const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -236,6 +402,11 @@ client.on('clientReady', () => {
     } catch (err) {
       console.error('[Cron rapport mensuel]', err);
     }
+  }, { timezone: 'Europe/Paris' });
+
+  // Rappels Google Calendar tous les matins à 9h00
+  cron.schedule('0 9 * * *', async () => {
+    await sendDailyReminders();
   }, { timezone: 'Europe/Paris' });
 });
 
@@ -247,13 +418,44 @@ client.on('messageCreate', async (message) => {
   await message.channel.sendTyping();
 
   try {
-    // Rapport mensuel manuel
+    // ── Rapport mensuel manuel
     if (isReportRequest(message.content)) {
       const now = new Date();
       await sendMonthlyReport(message.channel, now.getFullYear(), now.getMonth());
       return;
     }
 
+    // ── Rappel / calendrier
+    if (isReminderRequest(message.content)) {
+      if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_CALENDAR_ID) {
+        await message.reply('⚠️ Google Calendar non configuré. Ajoute `GOOGLE_SERVICE_ACCOUNT_JSON` et `GOOGLE_CALENDAR_ID` dans le .env.');
+        return;
+      }
+
+      try {
+        const reminder = await extractReminderDetails(message.content);
+        await createCalendarEvent(reminder.summary, reminder.description, reminder.date);
+
+        const dateLabel = new Date(reminder.date).toLocaleDateString('fr-FR', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+        });
+
+        await message.reply(
+          `📅 **Rappel ajouté au calendrier !**\n\n` +
+          `📌 **${reminder.summary}**\n` +
+          `🗓️ ${dateLabel}\n` +
+          (reminder.description !== reminder.summary ? `📝 ${reminder.description}\n` : '') +
+          `\n_Tu recevras un message dans #calendrier ce matin-là à 9h00._`
+        );
+        return;
+      } catch (err) {
+        console.error('[Reminder creation]', err);
+        await message.reply('❌ Impossible de créer le rappel : ' + err.message);
+        return;
+      }
+    }
+
+    // ── Stats temps réel
     let userContent = message.content;
 
     if (isStatsRequest(message.content)) {
@@ -274,6 +476,7 @@ Base de données :
 - Plan premium : ${dbStats.premiumUsers}`;
     }
 
+    // ── Conversation Claude
     history.push({ role: 'user', content: userContent });
     if (history.length > 20) history.splice(0, 2);
     conversations.set(message.channel.id, history);
@@ -288,7 +491,7 @@ Base de données :
     const reply = response.content[0].text;
     history.push({ role: 'assistant', content: reply });
 
-    // Découpe en chunks de 1900 chars max en respectant les sauts de paragraphe
+    // Découpe en chunks ≤ 1900 chars
     const chunks = [];
     const paragraphs = reply.split('\n\n');
     let current = '';
@@ -296,7 +499,6 @@ Base de données :
       const candidate = current ? current + '\n\n' + para : para;
       if (candidate.length > 1900) {
         if (current) chunks.push(current.trim());
-        // Si le paragraphe seul dépasse 1900, le découper par lignes
         if (para.length > 1900) {
           const lines = para.split('\n');
           let block = '';
@@ -318,13 +520,9 @@ Base de données :
     }
     if (current) chunks.push(current.trim());
 
-    // Envoi : premier chunk en reply, les suivants en message normal pour éviter le spam de mentions
     for (let i = 0; i < chunks.length; i++) {
-      if (i === 0) {
-        await message.reply(chunks[i]);
-      } else {
-        await message.channel.send(chunks[i]);
-      }
+      if (i === 0) await message.reply(chunks[i]);
+      else await message.channel.send(chunks[i]);
     }
 
   } catch (error) {
