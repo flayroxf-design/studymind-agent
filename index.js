@@ -784,13 +784,13 @@ client.on('clientReady', () => {
     return diff * 1000;
   }
 
-  // ☀️ 9h00 Paris : digest + rappels du jour
+  // ☀️ 4h00 Paris : digest + rappels du jour
   function scheduleMorning() {
     setTimeout(async () => {
       await sendMorningDigest();
       await sendDailyReminders();
       scheduleMorning(); // re-planifie pour le lendemain
-    }, msUntilNext(9, 0));
+    }, msUntilNext(4, 0));
   }
   scheduleMorning();
 
