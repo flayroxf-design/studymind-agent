@@ -1043,4 +1043,27 @@ client.on('messageCreate', async (message) => {
   }
 });
 
+// ─── Healthcheck HTTP (Railway garde le service vivant) ────────────────────────
+const http = require('http');
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end(JSON.stringify({ status: 'ok', bot: client.isReady() ? 'online' : 'connecting' }));
+}).listen(process.env.PORT || 3000);
+
+// ─── Protection anti-crash global ─────────────────────────────────────────────
+process.on('uncaughtException', (err) => {
+  console.error('[CRASH uncaughtException]', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[CRASH unhandledRejection]', reason);
+});
+
+// ─── Reconnexion auto si Discord déconnecte ───────────────────────────────────
+client.on('disconnect', () => {
+  console.warn('[Discord] Déconnecté — tentative de reconnexion...');
+});
+client.on('error', (err) => {
+  console.error('[Discord] Erreur client :', err.message);
+});
+
 client.login(process.env.DISCORD_BOT_TOKEN);
