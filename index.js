@@ -34,6 +34,7 @@ const conversations = new Map();
 
 const NOTES_FILE = path.join(__dirname, 'notes.json');
 const ALERTED_SUBS_FILE = path.join(__dirname, 'alerted-subs.json');
+const REMINDERS_FILE = path.join(__dirname, 'reminders.json');
 
 function readJSON(file, defaultVal) {
   try {
@@ -50,6 +51,52 @@ function saveNote(text) {
   const notes = readJSON(NOTES_FILE, []);
   notes.push({ text, date: new Date().toISOString() });
   writeJSON(NOTES_FILE, notes);
+}
+
+function loadReminders() { return readJSON(REMINDERS_FILE, []); }
+function saveReminders(data) { writeJSON(REMINDERS_FILE, data); }
+
+function addReminder({ summary, description, datetime, channelId, userId }) {
+  const reminders = loadReminders();
+  reminders.push({ id: Date.now().toString(), summary, description, datetime, channelId, userId, sent: false });
+  saveReminders(reminders);
+}
+
+async function checkPendingReminders() {
+  const reminders = loadReminders();
+  if (reminders.length === 0) return;
+
+  const now = new Date();
+  let changed = false;
+
+  for (const r of reminders) {
+    if (r.sent) continue;
+    if (now >= new Date(r.datetime)) {
+      try {
+        const channel = await client.channels.fetch(r.channelId);
+        if (channel) {
+          const timeLabel = new Date(r.datetime).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' });
+          const embed = new EmbedBuilder()
+            .setColor(0xFAA61A)
+            .setTitle('⏰ Rappel !')
+            .setDescription(`**${r.summary}**`)
+            .setFooter({ text: `Programmé à ${timeLabel}` });
+          if (r.description && r.description !== r.summary) {
+            embed.addFields({ name: '📝', value: r.description });
+          }
+          await channel.send({ content: `<@${r.userId}>`, embeds: [embed] });
+        }
+      } catch (e) { console.error('[Reminder fire]', e.message); }
+      r.sent = true;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    // Garde les rappels envoyés moins de 24h (pour historique), supprime les plus vieux
+    const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    saveReminders(reminders.filter(r => !r.sent || new Date(r.datetime) > cutoff));
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -390,16 +437,60 @@ function buildCalendarEmbed(events, dayLabel) {
 // ═══════════════════════════════════════════════════════════════
 
 async function sendDailyReminders() {
-  const channelId = process.env.CALENDRIER_CHANNEL_ID;
-  if (!channelId || !process.env.GOOGLE_CALENDAR_ID) return;
+  const channelId = process.env.CALENDRIER_CHANNEL_ID || process.env.AGENT_CHANNEL_ID;
+  if (!channelId) return;
 
   try {
     const channel = await client.channels.fetch(channelId);
     if (!channel) return;
     const today = new Date();
-    const events = await getEventsForDate(today);
     const dayLabel = today.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-    const embed = buildCalendarEmbed(events, dayLabel);
+
+    // Rappels Google Calendar
+    let calEvents = [];
+    if (process.env.GOOGLE_CALENDAR_ID) {
+      try { calEvents = await getEventsForDate(today); } catch (e) { console.error('[Cal]', e.message); }
+    }
+
+    // Rappels locaux du jour (non encore envoyés)
+    const todayStr = today.toISOString().slice(0, 10);
+    const localReminders = loadReminders().filter(r => {
+      if (r.sent) return false;
+      return r.datetime.slice(0, 10) === todayStr;
+    });
+
+    const embed = new EmbedBuilder()
+      .setColor(0x43B581)
+      .setTitle(`📅 Rappels du jour — ${dayLabel}`);
+
+    let description = '';
+
+    if (calEvents.length === 0 && localReminders.length === 0) {
+      description = 'Aucun rappel aujourd\'hui. Bonne journée ! 🚀';
+    } else {
+      // Affiche d'abord les rappels locaux (avec heure précise)
+      if (localReminders.length > 0) {
+        for (const r of localReminders.sort((a, b) => new Date(a.datetime) - new Date(b.datetime))) {
+          const timeLabel = new Date(r.datetime).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' });
+          description += `⏰ **${timeLabel}** — **${r.summary}**\n`;
+          if (r.description && r.description !== r.summary) description += `> ${r.description}\n`;
+          description += '\n';
+        }
+      }
+      // Puis les événements Google Calendar
+      for (const event of calEvents) {
+        const time = event.start?.dateTime
+          ? new Date(event.start.dateTime).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+          : null;
+        description += time ? `🗓️ **${time}** — **${event.summary}**` : `📌 **${event.summary}**`;
+        if (event.description && event.description !== event.summary) description += `\n> ${event.description}`;
+        description += '\n\n';
+      }
+    }
+
+    embed.setDescription(description.trim());
+    const total = calEvents.length + localReminders.length;
+    if (total > 0) embed.setFooter({ text: `${total} rappel${total > 1 ? 's' : ''} aujourd'hui` });
     await channel.send({ embeds: [embed] });
   } catch (err) {
     console.error('[Daily reminders]', err);
@@ -553,8 +644,9 @@ function detectIntent(text) {
   const agendaKw = ['mon agenda', 'mes rappels', 'prochains rappels', 'quoi cette semaine', 'prochain événement', "c'est quoi cette semaine", 'voir mes rappels'];
   if (agendaKw.some(k => t.includes(k))) return 'agenda';
 
-  const reminderKw = ['rappelle-moi', 'rappelle moi', 'rappel :', "n'oublie pas", 'note que', 'ajoute au calendrier', 'mets dans le calendrier', 'planifie', 'lundi prochain', 'mardi prochain', 'mercredi prochain', 'jeudi prochain', 'vendredi prochain', 'samedi prochain', 'dimanche prochain', 'la semaine prochaine', 'dans une semaine', 'dans deux semaines', 'demain matin', 'ce soir', 'ajoute un rappel', 'crée un rappel'];
+  const reminderKw = ['rappelle-moi', 'rappelle moi', 'rappel :', "n'oublie pas", 'ajoute au calendrier', 'mets dans le calendrier', 'planifie', 'lundi prochain', 'mardi prochain', 'mercredi prochain', 'jeudi prochain', 'vendredi prochain', 'samedi prochain', 'dimanche prochain', 'la semaine prochaine', 'dans une semaine', 'dans deux semaines', 'demain matin', 'ce soir', 'ajoute un rappel', 'crée un rappel', 'dans une heure', 'dans deux heures'];
   if (reminderKw.some(k => t.includes(k))) return 'reminder';
+  if (/dans \d+h\d*/.test(t) || /dans \d+ ?(min|minute|heure)/.test(t) || /rappelle.{0,10}dans/.test(t) || /à \d{1,2}h\d{0,2}/.test(t)) return 'reminder';
 
   const noteKw = ['note ça', 'note ceci', 'sauvegarde ça', 'enregistre ça', 'garde en mémoire', 'idée :', 'mémorise ça'];
   if (noteKw.some(k => t.includes(k))) return 'note_save';
@@ -567,23 +659,37 @@ function detectIntent(text) {
 // ═══════════════════════════════════════════════════════════════
 
 async function extractReminderDetails(userMessage) {
-  const today = new Date().toLocaleDateString('fr-FR', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  });
-  const todayISO = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const todayFR = now.toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeFR = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' });
+  const nowISO = now.toISOString();
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 300,
-    system: `Tu es un assistant qui extrait des informations de rappel depuis des messages en français.
-Aujourd'hui : ${today} (${todayISO}).
-Retourne UNIQUEMENT un JSON valide, sans markdown :
-{"summary":"Titre court (10 mots max)","description":"Description complète","date":"YYYY-MM-DD"}
-Si pas de date précise, utilise dans 7 jours. Ne retourne QUE le JSON.`,
+    system: `Tu extrais des rappels depuis des messages français. Maintenant : ${todayFR} à ${timeFR} (ISO: ${nowISO}).
+Retourne UNIQUEMENT un JSON valide sans markdown :
+{"summary":"Titre court (10 mots max)","description":"Description complète","datetime":"YYYY-MM-DDTHH:MM:00+02:00","hasTime":true}
+Règles :
+- "dans 1h30" → ajoute 1h30 à l'heure actuelle
+- "dans 30 minutes" / "dans 2h" → calcule depuis maintenant
+- "à 15h" / "à 15h30" → cette heure aujourd'hui (ou demain si déjà passée)
+- "ce soir à 20h" → aujourd'hui 20:00
+- "demain matin" → demain 09:00, hasTime: true
+- Pas d'heure → hasTime: false, utilise 08:00 le bon jour
+- Timezone Europe/Paris = +02:00 en été, +01:00 en hiver
+Ne retourne QUE le JSON.`,
     messages: [{ role: 'user', content: userMessage }],
   });
 
-  return JSON.parse(response.content[0].text.trim());
+  const raw = response.content[0].text.trim()
+    .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  const parsed = JSON.parse(raw);
+  if (!parsed.datetime && parsed.date) {
+    parsed.datetime = parsed.date + 'T08:00:00+02:00';
+    parsed.hasTime = false;
+  }
+  return parsed;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -663,27 +769,56 @@ client.on('clientReady', () => {
   console.log(`   STATS     → ${process.env.STATS_CHANNEL_ID || '— (optionnel)'}`);
   console.log(`   ALERTES   → ${process.env.ALERTES_CHANNEL_ID || '— (optionnel)'}`);
 
-  // ☀️ 9h00 : digest quotidien (stats) + rappels calendrier
-  cron.schedule('0 9 * * *', async () => {
-    await sendMorningDigest();
-    await sendDailyReminders();
-  }, { timezone: 'Europe/Paris' });
-
-  // 📊 1er du mois à 8h00 : rapport mensuel automatique
-  cron.schedule('0 8 1 * *', async () => {
+  // Planificateur — calcul fiable de l'heure Paris (Intl API, fonctionne sur Linux/Railway)
+  function msUntilNext(hour, minute = 0) {
     const now = new Date();
-    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    try {
-      const channel = await client.channels.fetch(process.env.AGENT_CHANNEL_ID);
-      if (channel) await sendMonthlyReport(channel, prev.getFullYear(), prev.getMonth());
-    } catch (err) { console.error('[Cron rapport mensuel]', err); }
-  }, { timezone: 'Europe/Paris' });
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Paris',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(now);
+    const get = (type) => parseInt(parts.find(p => p.type === type).value);
+    const elapsed = get('hour') * 3600 + get('minute') * 60 + get('second');
+    const target = hour * 3600 + minute * 60;
+    let diff = target - elapsed;
+    if (diff <= 0) diff += 24 * 3600;
+    return diff * 1000;
+  }
 
-  // 🔔 Toutes les 10 min : nouveaux abonnés → #alertes
-  cron.schedule('*/10 * * * *', checkNewSubscribers, { timezone: 'Europe/Paris' });
+  // ☀️ 9h00 Paris : digest + rappels du jour
+  function scheduleMorning() {
+    setTimeout(async () => {
+      await sendMorningDigest();
+      await sendDailyReminders();
+      scheduleMorning(); // re-planifie pour le lendemain
+    }, msUntilNext(9, 0));
+  }
+  scheduleMorning();
 
-  // 📧 Toutes les 5 min : nouveaux emails → #email
-  cron.schedule('*/5 * * * *', checkNewEmails, { timezone: 'Europe/Paris' });
+  // 📊 1er du mois à 8h00 : rapport mensuel
+  function scheduleMonthlyReport() {
+    setTimeout(async () => {
+      const now = new Date();
+      const parisNow = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Paris' }));
+      if (parisNow.getDate() === 1) {
+        const prev = new Date(parisNow.getFullYear(), parisNow.getMonth() - 1, 1);
+        try {
+          const channel = await client.channels.fetch(process.env.AGENT_CHANNEL_ID);
+          if (channel) await sendMonthlyReport(channel, prev.getFullYear(), prev.getMonth());
+        } catch (err) { console.error('[Rapport mensuel]', err); }
+      }
+      scheduleMonthlyReport();
+    }, msUntilNext(8, 0));
+  }
+  scheduleMonthlyReport();
+
+  // ⏰ Toutes les minutes : rappels précis
+  setInterval(checkPendingReminders, 60 * 1000);
+
+  // 🔔 Toutes les 10 min : nouveaux abonnés
+  setInterval(checkNewSubscribers, 10 * 60 * 1000);
+
+  // 📧 Toutes les 5 min : nouveaux emails
+  setInterval(checkNewEmails, 5 * 60 * 1000);
 });
 
 client.on('messageCreate', async (message) => {
@@ -781,32 +916,53 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // ── Rappel Google Calendar
+    // ── Rappel (local avec heure précise + Google Calendar optionnel)
     if (intent === 'reminder') {
-      if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_CALENDAR_ID) {
-        await message.reply('⚠️ Google Calendar non configuré. Vérifie `GOOGLE_SERVICE_ACCOUNT_JSON` et `GOOGLE_CALENDAR_ID` dans `.env`.');
-        return;
-      }
       try {
         const reminder = await extractReminderDetails(message.content);
-        await createCalendarEvent(reminder.summary, reminder.description, reminder.date);
+        const targetDate = new Date(reminder.datetime);
 
-        const dateLabel = new Date(reminder.date + 'T12:00:00').toLocaleDateString('fr-FR', {
-          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+        // Stockage local → ping à l'heure exacte
+        addReminder({
+          summary: reminder.summary,
+          description: reminder.description,
+          datetime: reminder.datetime,
+          channelId: message.channel.id,
+          userId: message.author.id,
         });
 
-        const embed = new EmbedBuilder()
-          .setColor(0x43B581)
-          .setTitle('📅 Rappel ajouté !')
-          .addFields(
+        // Google Calendar optionnel (si configuré)
+        let calAdded = false;
+        if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON && process.env.GOOGLE_CALENDAR_ID) {
+          try {
+            await createCalendarEvent(reminder.summary, reminder.description, reminder.datetime);
+            calAdded = true;
+          } catch (e) { console.error('[Cal add]', e.message); }
+        }
+
+        const embed = new EmbedBuilder().setColor(0x43B581).setTitle('⏰ Rappel programmé !');
+
+        if (reminder.hasTime) {
+          const timeLabel = targetDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' });
+          const dateLabel = targetDate.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Paris' });
+          embed.addFields(
+            { name: '📌 Rappel', value: reminder.summary },
+            { name: '🗓️ Quand', value: `${dateLabel} à **${timeLabel}**`, inline: true },
+          );
+          embed.setFooter({ text: `Je te pingerai à ${timeLabel} pile ✅` });
+        } else {
+          const dateLabel = targetDate.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Paris' });
+          embed.addFields(
             { name: '📌 Rappel', value: reminder.summary },
             { name: '🗓️ Date', value: dateLabel, inline: true },
           );
+          embed.setFooter({ text: 'Inclus dans le récap de 9h00 ce jour-là ✅' });
+        }
 
         if (reminder.description && reminder.description !== reminder.summary) {
           embed.addFields({ name: '📝 Détails', value: reminder.description });
         }
-        embed.setFooter({ text: 'Tu recevras un message dans #calendrier ce matin-là à 9h00.' });
+
         await message.reply({ embeds: [embed] });
         return;
       } catch (err) {
