@@ -137,8 +137,8 @@ async function checkNewEmails() {
     const gmail = getGmailClient();
     const res = await gmail.users.messages.list({
       userId: 'me',
-      q: 'is:unread in:inbox newer_than:1h',
-      maxResults: 10,
+      q: 'in:inbox newer_than:2h',
+      maxResults: 15,
     });
 
     const messages = res.data.messages || [];
