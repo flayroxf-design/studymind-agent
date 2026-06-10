@@ -1030,6 +1030,7 @@ function applyFinancesChanges(fin, changes) {
 function detectIntent(text) {
   const t = text.toLowerCase().trim();
 
+  if (t === '!gmail' || t === '!emails') return 'gmail_check';
   if (['!stats', '!dashboard', '!kpi'].includes(t)) return 'stats';
   if (t === '!rapport' || t.startsWith('!rapport ')) return 'report';
   if (['!agenda', '!rappels', '!calendrier'].includes(t)) return 'agenda';
@@ -1399,6 +1400,14 @@ client.on('messageCreate', async (message) => {
 
   try {
     const intent = detectIntent(message.content);
+
+    // ── Gmail check manuel
+    if (intent === 'gmail_check') {
+      await message.reply('📬 Vérification Gmail en cours...');
+      await checkNewEmails();
+      await message.reply('✅ Vérification terminée ! Si un nouvel email était là, il vient d\'apparaître dans le salon email.');
+      return;
+    }
 
     // ── Stats dashboard
     if (intent === 'stats') {
