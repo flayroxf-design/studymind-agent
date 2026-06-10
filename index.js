@@ -699,6 +699,24 @@ async function buildFinancesEmbed() {
     inline: false,
   });
 
+  // 🤖 Crédits Anthropic API
+  if (fin.apiCredits?.anthropic) {
+    const api = fin.apiCredits.anthropic;
+    const daysLeft = api.estimatedDailyBurn > 0
+      ? Math.floor(api.balance / api.estimatedDailyBurn)
+      : 99;
+    const apiStatus = api.balance < api.alertThreshold
+      ? '🚨 RECHARGER MAINTENANT'
+      : api.balance < api.alertThreshold * 2
+      ? '⚠️ Bientôt vide'
+      : '✅ OK';
+    embed.addFields({
+      name: '🤖 Crédits Anthropic API',
+      value: `Solde : **${euros(api.balance)}** — ${apiStatus}\nBurn estimé : ~${euros(api.estimatedDailyBurn)}/jour → **${daysLeft} jours** restants\nSeuil d'alerte : ${euros(api.alertThreshold)} | _Recharger sur console.anthropic.com_`,
+      inline: false,
+    });
+  }
+
   return embed;
 }
 
@@ -884,9 +902,14 @@ Tu gères ses finances personnelles liées au SaaS dans ce channel Discord dédi
 - Claude API (Anthropic) : ~18€/mois (IA de l'app)
 - Google One : 22€/mois
 - Domaine studymind.net : 13€/an
-- Resend : gratuit (emails)
+- Resend Pro : 18€/mois (emails marketing — 50 000/mois)
 - Railway Hobby : 5$/mois (hébergement bot Discord)
 - Revenues : Stripe Premium (6,99€/mois ou 69,99€/an par abonné)
+
+**Crédits API Anthropic (suivi séparé) :**
+- Raphaël recharge manuellement par tranches de 20€ sur console.anthropic.com
+- Burn estimé : ~0,80€/jour (varie selon trafic app)
+- Alerte automatique quand < 5€
 
 **Quand Raphaël te dit quelque chose, tu dois retourner un JSON UNIQUEMENT dans ce format :**
 {
@@ -898,7 +921,8 @@ Tu gères ses finances personnelles liées au SaaS dans ce channel Discord dédi
     "clear_incoming": true,        // si on veut vider les entrées attendues
     "update_expense": { "name": "...", "dueInDays": 0, "amount": 0 },  // si charge modifiée
     "add_expense": { "name": "...", "icon": "💸", "amount": 0, "dueInDays": 0, "billingCycle": "mensuel", "note": "" },
-    "mark_paid": "NomDeLaCharge"   // remet dueInDays à 30 pour cette charge
+    "mark_paid": "NomDeLaCharge",  // remet dueInDays à 30 pour cette charge
+    "recharge_anthropic": 20       // AJOUTE ce montant aux crédits Anthropic API
   },
   "show_embed": true | false       // true si tu veux afficher le résumé financier complet
 }
@@ -908,6 +932,7 @@ Tu gères ses finances personnelles liées au SaaS dans ce channel Discord dédi
 - "mon solde est 80€" → action update, balance_current: 80, show_embed: true
 - "j'attends 50€ vendredi" → action update, add_incoming avec inDays estimé, show_embed: false
 - "c'est quoi ma situation ?" → action status, show_embed: true
+- "j'ai rechargé 20€ sur Anthropic/Claude" → action update, recharge_anthropic: 20, show_embed: true
 - question/discussion → action respond, show_embed: false
 - Toujours analyser : est-ce qu'on est en positif après les charges du mois prochain ?
 - Répondre en français, tutoyer Raphaël, être direct et concis`;
@@ -975,6 +1000,21 @@ function applyFinancesChanges(fin, changes) {
         e.name && e.name.toLowerCase().includes(changes.mark_paid.toLowerCase())
       );
       if (exp) exp.dueInDays = 30;
+    }
+    // Recharge crédits Anthropic API
+    if (changes.recharge_anthropic !== undefined && changes.recharge_anthropic !== null) {
+      if (!updated.apiCredits) updated.apiCredits = {};
+      if (!updated.apiCredits.anthropic) updated.apiCredits.anthropic = { balance: 0, alertThreshold: 5, estimatedDailyBurn: 0.80 };
+      updated.apiCredits.anthropic.balance = Math.round((updated.apiCredits.anthropic.balance + Number(changes.recharge_anthropic)) * 100) / 100;
+      updated.apiCredits.anthropic.lastRecharge = new Date().toISOString().slice(0, 10);
+    }
+    // Mise à jour burn rate Anthropic
+    if (changes.anthropic_daily_burn !== undefined) {
+      if (!updated.apiCredits?.anthropic) {
+        if (!updated.apiCredits) updated.apiCredits = {};
+        updated.apiCredits.anthropic = { balance: 0, alertThreshold: 5, estimatedDailyBurn: 0.80 };
+      }
+      updated.apiCredits.anthropic.estimatedDailyBurn = Number(changes.anthropic_daily_burn);
     }
   } catch (err) {
     console.error('[applyFinancesChanges]', err.message);
@@ -1233,6 +1273,34 @@ client.on('clientReady', () => {
         }
         // Supprime les virements reçus (inDays = 0 depuis la veille)
         fin.balance.incoming = fin.balance.incoming.filter(i => i.inDays > 0);
+
+        // 🤖 Décrémente les crédits Anthropic API selon le burn quotidien
+        if (fin.apiCredits?.anthropic && fin.apiCredits.anthropic.estimatedDailyBurn > 0) {
+          fin.apiCredits.anthropic.balance = Math.max(
+            0,
+            fin.apiCredits.anthropic.balance - fin.apiCredits.anthropic.estimatedDailyBurn
+          );
+          fin.apiCredits.anthropic.balance = Math.round(fin.apiCredits.anthropic.balance * 100) / 100;
+          changed = true;
+
+          // Alerte si balance < seuil
+          const api = fin.apiCredits.anthropic;
+          if (api.balance < api.alertThreshold) {
+            const channelId = process.env.SECRETAIRE_CHANNEL_ID;
+            if (channelId) {
+              try {
+                const ch = await client.channels.fetch(channelId);
+                if (ch) await ch.send(
+                  `🚨 **Alerte Anthropic API** — Crédits bas !\n\n` +
+                  `Solde actuel : **${euros(api.balance)}** (seuil : ${euros(api.alertThreshold)})\n` +
+                  `Recharger sur → https://console.anthropic.com/settings/billing\n` +
+                  `_(Dis-moi "j'ai rechargé 20€ sur Anthropic" quand c'est fait)_`
+                );
+              } catch (e) { console.error('[Anthropic alert]', e.message); }
+            }
+          }
+        }
+
         if (changed) writeJSON(FINANCES_FILE, fin);
       } catch (err) { console.error('[Daily decrement]', err.message); }
       scheduleDailyDecrement();

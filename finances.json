@@ -51,10 +51,19 @@
     {
       "name": "Resend (emails)",
       "icon": "📧",
-      "amount": 0,
-      "dueInDays": 999,
-      "billingCycle": "gratuit",
-      "note": "Tier gratuit — 3 000 emails/mois. OK pour l'instant."
+      "amount": 18,
+      "dueInDays": 30,
+      "billingCycle": "mensuel",
+      "note": "Passé Pro le 10/06 — 50 000 emails/mois, unlimited daily"
     }
-  ]
+  ],
+  "apiCredits": {
+    "anthropic": {
+      "balance": 20.00,
+      "alertThreshold": 5.00,
+      "lastRecharge": "2026-06-10",
+      "estimatedDailyBurn": 0.80,
+      "note": "Recharger par tranches de 20€ sur console.anthropic.com. Alerte automatique quand < 5€."
+    }
+  }
 }
