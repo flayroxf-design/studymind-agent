@@ -749,21 +749,16 @@ async function handleSecretaire(message, financesData, stripeData) {
   const fin = financesData;
   const bal = estimatedBalance(fin);
 
-  const context = `
-Données actuelles (finances.json) :
-- Solde : ${fin.balance.current}€
-- Entrées attendues : ${JSON.stringify(fin.balance.incoming)}
-- Charges : ${JSON.stringify(fin.expenses.map(e => ({ name: e.name, amount: e.amount, dueInDays: e.dueInDays })))}
-- Total disponible : ${bal.total}€
-- Total charges 30j : ${bal.fixed}€
-- Solde net estimé : ${bal.remaining}€
-${stripeData ? `- MRR Stripe : ${stripeData.mrr}€ | Abonnés actifs : ${stripeData.activeSubscriptions}` : ''}
+  const context = `Données actuelles :
+Solde=${fin.balance.current}€ | Entrées=${JSON.stringify(fin.balance.incoming)} | Total dispo=${bal.total.toFixed(2)}€ | Charges30j=${bal.fixed.toFixed(2)}€ | Net=${bal.remaining.toFixed(2)}€
+${stripeData ? `MRR=${stripeData.mrr}€ | Abonnés=${stripeData.activeSubscriptions}` : ''}
+Charges: ${fin.expenses.filter(e => e.amount > 0).map(e => `${e.name}=${e.amount}€ J+${e.dueInDays}`).join(', ')}
 
-Message de Raphaël : "${message}"`;
+Message: "${message.slice(0, 800)}"`;
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 600,
+    max_tokens: 500,
     system: SECRETAIRE_SYSTEM,
     messages: [{ role: 'user', content: context }],
   });
@@ -772,9 +767,12 @@ Message de Raphaël : "${message}"`;
     .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Valider la structure minimale
+    if (!parsed.action) parsed.action = 'respond';
+    if (!parsed.message) parsed.message = 'Données mises à jour.';
+    return parsed;
   } catch {
-    // Si Claude ne renvoie pas du JSON valide → réponse texte simple
     return { action: 'respond', message: raw.slice(0, 500), show_embed: false };
   }
 }
