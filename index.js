@@ -771,35 +771,48 @@ Message de Raphaël : "${message}"`;
   const raw = response.content[0].text.trim()
     .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Si Claude ne renvoie pas du JSON valide → réponse texte simple
+    return { action: 'respond', message: raw.slice(0, 500), show_embed: false };
+  }
 }
 
 function applyFinancesChanges(fin, changes) {
   if (!changes) return fin;
   const updated = JSON.parse(JSON.stringify(fin)); // deep copy
 
-  if (changes.balance_current !== undefined) {
-    updated.balance.current = changes.balance_current;
-  }
-  if (changes.add_incoming) {
-    updated.balance.incoming.push(changes.add_incoming);
-  }
-  if (changes.clear_incoming) {
-    updated.balance.incoming = [];
-  }
-  if (changes.update_expense) {
-    const exp = updated.expenses.find(e => e.name.toLowerCase().includes(changes.update_expense.name.toLowerCase()));
-    if (exp) {
-      if (changes.update_expense.dueInDays !== undefined) exp.dueInDays = changes.update_expense.dueInDays;
-      if (changes.update_expense.amount !== undefined) exp.amount = changes.update_expense.amount;
+  try {
+    if (changes.balance_current !== undefined && changes.balance_current !== null) {
+      updated.balance.current = Number(changes.balance_current);
     }
-  }
-  if (changes.add_expense) {
-    updated.expenses.push(changes.add_expense);
-  }
-  if (changes.mark_paid) {
-    const exp = updated.expenses.find(e => e.name.toLowerCase().includes(changes.mark_paid.toLowerCase()));
-    if (exp) exp.dueInDays = 30; // remis à 30 jours
+    if (changes.add_incoming && changes.add_incoming.amount) {
+      updated.balance.incoming.push(changes.add_incoming);
+    }
+    if (changes.clear_incoming) {
+      updated.balance.incoming = [];
+    }
+    if (changes.update_expense && changes.update_expense.name) {
+      const exp = updated.expenses.find(e =>
+        e.name && e.name.toLowerCase().includes(changes.update_expense.name.toLowerCase())
+      );
+      if (exp) {
+        if (changes.update_expense.dueInDays !== undefined) exp.dueInDays = changes.update_expense.dueInDays;
+        if (changes.update_expense.amount !== undefined) exp.amount = changes.update_expense.amount;
+      }
+    }
+    if (changes.add_expense && changes.add_expense.name) {
+      updated.expenses.push(changes.add_expense);
+    }
+    if (changes.mark_paid && typeof changes.mark_paid === 'string') {
+      const exp = updated.expenses.find(e =>
+        e.name && e.name.toLowerCase().includes(changes.mark_paid.toLowerCase())
+      );
+      if (exp) exp.dueInDays = 30;
+    }
+  } catch (err) {
+    console.error('[applyFinancesChanges]', err.message);
   }
 
   return updated;

@@ -1,45 +1,52 @@
 {
-  "_note": "Met à jour balance.current chaque semaine. dueInDays = jours avant la prochaine échéance.",
+  "_note": "Mis à jour le 10/06/2026. dueInDays = jours avant la prochaine échéance.",
   "balance": {
-    "current": 50,
+    "current": 45.82,
     "incoming": [
-      { "label": "Virement #1", "amount": 70, "inDays": 1 },
-      { "label": "Virement #2", "amount": 3, "inDays": 3 },
-      { "label": "Virement #3", "amount": 18, "inDays": 4 }
+      { "label": "Stripe abonnements", "amount": 68.20, "inDays": 1 },
+      { "label": "Stripe abonnements", "amount": 3.68, "inDays": 5 }
     ]
   },
   "expenses": [
     {
       "name": "Vercel Pro",
       "icon": "☁️",
-      "amount": 18,
+      "amount": 17.46,
       "dueInDays": 7,
       "billingCycle": "mensuel",
-      "note": "Hébergement Next.js + Cron jobs"
+      "note": "Renouvellement le 17 de chaque mois (~20$)"
     },
     {
-      "name": "Claude (Anthropic API)",
+      "name": "Claude.ai (Anthropic API)",
       "icon": "🤖",
-      "amount": 18,
+      "amount": 20.76,
       "dueInDays": 12,
       "billingCycle": "mensuel",
-      "note": "API utilisée par les fonctionnalités IA de l'app"
+      "note": "Renouvellement le 22 de chaque mois (~24$) — API utilisée par l'app"
     },
     {
       "name": "Google One",
       "icon": "☁️",
-      "amount": 22,
+      "amount": 21.99,
       "dueInDays": 13,
       "billingCycle": "mensuel",
-      "note": "Stockage Google"
+      "note": "Renouvellement le 23 de chaque mois"
     },
     {
-      "name": "Domaine studymind.net",
+      "name": "Railway Hobby",
+      "icon": "🚂",
+      "amount": 4.35,
+      "dueInDays": 30,
+      "billingCycle": "mensuel",
+      "note": "Payé aujourd'hui 10/06 (~5$) — hébergement bot Discord"
+    },
+    {
+      "name": "Vercel Domaine",
       "icon": "🌐",
-      "amount": 13,
-      "dueInDays": 355,
+      "amount": 11.56,
+      "dueInDays": 337,
       "billingCycle": "annuel",
-      "note": "Renouvellement annuel domaine"
+      "note": "Renouvellement annuel ~mai 2027 (~13.50$)"
     },
     {
       "name": "Resend (emails)",
@@ -47,7 +54,7 @@
       "amount": 0,
       "dueInDays": 999,
       "billingCycle": "gratuit",
-      "note": "Tier gratuit — 3 000 emails/mois. Surveille la consommation."
+      "note": "Tier gratuit — 3 000 emails/mois. OK pour l'instant."
     }
   ]
 }
