@@ -36,6 +36,8 @@ const NOTES_FILE = path.join(__dirname, 'notes.json');
 const ALERTED_SUBS_FILE = path.join(__dirname, 'alerted-subs.json');
 const REMINDERS_FILE = path.join(__dirname, 'reminders.json');
 const FINANCES_FILE = path.join(__dirname, 'finances.json');
+const GROWTH_SNAPSHOT_FILE = path.join(__dirname, 'growth-snapshot.json');
+const MILESTONES_FILE = path.join(__dirname, 'milestones.json');
 
 function readJSON(file, defaultVal) {
   try {
@@ -701,6 +703,171 @@ async function buildFinancesEmbed() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// CROISSANCE — rapport hebdo + alertes milestones
+// ═══════════════════════════════════════════════════════════════
+
+// Milestones à surveiller (dans l'ordre)
+const MILESTONE_DEFS = [
+  { key: 'premium_1',   label: '🥇 Premier abonné Premium !',       type: 'premium', value: 1 },
+  { key: 'premium_5',   label: '🎯 5 abonnés Premium !',            type: 'premium', value: 5 },
+  { key: 'premium_10',  label: '🚀 10 abonnés Premium !',           type: 'premium', value: 10 },
+  { key: 'premium_25',  label: '💎 25 abonnés Premium !',           type: 'premium', value: 25 },
+  { key: 'premium_50',  label: '🏆 50 abonnés Premium !',           type: 'premium', value: 50 },
+  { key: 'premium_100', label: '👑 100 abonnés Premium !',          type: 'premium', value: 100 },
+  { key: 'mrr_50',      label: '💰 50€ MRR atteints !',             type: 'mrr',     value: 50 },
+  { key: 'mrr_100',     label: '💰 100€ MRR atteints !',            type: 'mrr',     value: 100 },
+  { key: 'mrr_250',     label: '💰 250€ MRR atteints !',            type: 'mrr',     value: 250 },
+  { key: 'mrr_500',     label: '🤑 500€ MRR atteints !',            type: 'mrr',     value: 500 },
+  { key: 'mrr_1000',    label: '🎰 1 000€ MRR — ça devient sérieux !', type: 'mrr', value: 1000 },
+  { key: 'users_50',    label: '👥 50 inscrits !',                  type: 'users',   value: 50 },
+  { key: 'users_100',   label: '👥 100 inscrits !',                 type: 'users',   value: 100 },
+  { key: 'users_500',   label: '👥 500 inscrits !',                 type: 'users',   value: 500 },
+  { key: 'users_1000',  label: '🌍 1 000 inscrits — produit validé !', type: 'users', value: 1000 },
+];
+
+async function checkMilestones(stripeData, dbData) {
+  const channelId = process.env.CROISSANCE_CHANNEL_ID;
+  if (!channelId || (!stripeData && !dbData)) return;
+
+  const achieved = readJSON(MILESTONES_FILE, { done: [] });
+
+  for (const m of MILESTONE_DEFS) {
+    if (achieved.done.includes(m.key)) continue;
+
+    let reached = false;
+    if (m.type === 'premium' && stripeData) reached = stripeData.activeSubscriptions >= m.value;
+    if (m.type === 'mrr'     && stripeData) reached = stripeData.mrr >= m.value;
+    if (m.type === 'users'   && dbData)     reached = dbData.totalUsers >= m.value;
+
+    if (reached) {
+      try {
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (!channel) continue;
+
+        const embed = new EmbedBuilder()
+          .setColor(0xFFD700)
+          .setTitle(`🎉 MILESTONE DÉBLOQUÉ`)
+          .setDescription(`## ${m.label}`)
+          .addFields(
+            stripeData ? { name: '💰 MRR actuel', value: `**${stripeData.mrr}€**`, inline: true } : [],
+            stripeData ? { name: '👥 Premium actifs', value: `**${stripeData.activeSubscriptions}**`, inline: true } : [],
+            dbData     ? { name: '📊 Total inscrits', value: `**${dbData.totalUsers}**`, inline: true } : [],
+          ).filter(f => f)
+          .setTimestamp()
+          .setFooter({ text: 'studymind.net — continue comme ça 🚀' });
+
+        await channel.send({ embeds: [embed] });
+        achieved.done.push(m.key);
+        writeJSON(MILESTONES_FILE, achieved);
+      } catch (err) { console.error('[Milestone]', err.message); }
+    }
+  }
+}
+
+async function sendWeeklyGrowthReport() {
+  const channelId = process.env.CROISSANCE_CHANNEL_ID;
+  if (!channelId) return;
+
+  try {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    // Stats actuelles
+    let stripeData = null, dbData = null;
+    try { if (stripe) stripeData = await getStripeStats(); } catch { /* noop */ }
+    try { if (db) dbData = await getDbStats(); } catch { /* noop */ }
+
+    if (!stripeData && !dbData) return;
+
+    // Snapshot de la semaine dernière
+    const snap = readJSON(GROWTH_SNAPSHOT_FILE, null);
+    const now = new Date();
+
+    // Calcul des variations
+    const diffUsers   = snap ? (dbData?.totalUsers ?? 0) - (snap.totalUsers ?? 0) : null;
+    const diffPremium = snap ? (stripeData?.activeSubscriptions ?? 0) - (snap.premiumUsers ?? 0) : null;
+    const diffMrr     = snap ? (stripeData?.mrr ?? 0) - (snap.mrr ?? 0) : null;
+    const convRate    = dbData && stripeData && dbData.totalUsers > 0
+      ? ((stripeData.activeSubscriptions / dbData.totalUsers) * 100).toFixed(1)
+      : '—';
+
+    function delta(n) {
+      if (n === null) return '—';
+      return n > 0 ? `+${n}` : `${n}`;
+    }
+    function deltaMrr(n) {
+      if (n === null) return '—';
+      return n > 0 ? `+${n.toFixed(2)}€` : `${n.toFixed(2)}€`;
+    }
+    function trend(n) {
+      if (n === null || n === 0) return '➡️';
+      return n > 0 ? '📈' : '📉';
+    }
+
+    // Générer les 3 actions prioritaires via Claude
+    let actions = '1. Continue à poster sur TikTok 3x/semaine\n2. Analyse les mails des nouveaux inscrits\n3. Vérifie le taux de conversion';
+    try {
+      const prompt = `StudyMind SaaS stats cette semaine:
+- Inscrits: ${dbData?.totalUsers ?? '?'} total (${delta(diffUsers)} vs semaine dernière)
+- Premium: ${stripeData?.activeSubscriptions ?? '?'} (${delta(diffPremium)} vs semaine dernière)
+- MRR: ${stripeData?.mrr ?? '?'}€ (${deltaMrr(diffMrr)} vs semaine dernière)
+- Conversion: ${convRate}%
+- Nouveaux abonnés ce mois: ${stripeData?.newThisMonth ?? '?'}
+
+Donne 3 actions CONCRÈTES et ACTIONNABLES pour cette semaine pour améliorer ces métriques. Format: liste numérotée, 1 ligne par action, très concis.`;
+
+      const resp = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }],
+      });
+      actions = resp.content[0].text.trim();
+    } catch { /* garde les actions par défaut */ }
+
+    // Construire l'embed
+    const weekLabel = now.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
+    const embed = new EmbedBuilder()
+      .setColor(0x7c3aed)
+      .setTitle(`📈 Rapport hebdomadaire — ${weekLabel}`)
+      .setTimestamp()
+      .setFooter({ text: 'studymind.net' });
+
+    if (dbData) {
+      embed.addFields({
+        name: `👥 Utilisateurs  ${trend(diffUsers)}`,
+        value: `Total : **${dbData.totalUsers}** inscrits\nCette semaine : **${delta(diffUsers)}** nouveaux\nAujourd'hui : **+${dbData.newToday}** | Cette semaine : **+${dbData.newThisWeek}**`,
+        inline: false,
+      });
+    }
+
+    if (stripeData) {
+      embed.addFields({
+        name: `💰 Revenus  ${trend(diffMrr)}`,
+        value: `MRR : **${stripeData.mrr}€** (${deltaMrr(diffMrr)} vs S-1)\nARR : **${stripeData.arr}€**\nPremium actifs : **${stripeData.activeSubscriptions}** (${delta(diffPremium)} vs S-1)\nConversion : **${convRate}%**`,
+        inline: false,
+      });
+    }
+
+    embed.addFields({
+      name: '🎯 Top 3 actions cette semaine',
+      value: actions,
+      inline: false,
+    });
+
+    await channel.send({ embeds: [embed] });
+
+    // Sauvegarde snapshot pour la semaine prochaine
+    writeJSON(GROWTH_SNAPSHOT_FILE, {
+      date: now.toISOString(),
+      totalUsers: dbData?.totalUsers ?? 0,
+      premiumUsers: stripeData?.activeSubscriptions ?? 0,
+      mrr: stripeData?.mrr ?? 0,
+    });
+
+  } catch (err) { console.error('[Weekly growth]', err.message); }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // SECRÉTAIRE FINANCIER — channel dédié
 // ═══════════════════════════════════════════════════════════════
 
@@ -1011,11 +1178,42 @@ client.on('clientReady', () => {
   // ⏰ Toutes les minutes : rappels précis
   setInterval(checkPendingReminders, 60 * 1000);
 
-  // 🔔 Toutes les 10 min : nouveaux abonnés
-  setInterval(checkNewSubscribers, 10 * 60 * 1000);
+  // 🔔 Toutes les 10 min : nouveaux abonnés + milestones
+  setInterval(async () => {
+    await checkNewSubscribers();
+    // Check milestones en parallèle
+    try {
+      let sData = null, dData = null;
+      if (stripe) sData = await getStripeStats().catch(() => null);
+      if (db) dData = await getDbStats().catch(() => null);
+      if (sData || dData) await checkMilestones(sData, dData);
+    } catch { /* noop */ }
+  }, 10 * 60 * 1000);
 
   // 📧 Toutes les 5 min : nouveaux emails
   setInterval(checkNewEmails, 5 * 60 * 1000);
+
+  // 📈 Lundi 8h00 : rapport hebdomadaire #croissance
+  function scheduleWeeklyReport() {
+    const now = new Date();
+    const parisParts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Paris',
+      weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(now);
+    const getP = (type) => parisParts.find(p => p.type === type).value;
+    const isMonday = getP('weekday') === 'Mon';
+    const h = parseInt(getP('hour')), m = parseInt(getP('minute')), s = parseInt(getP('second'));
+    const elapsedSec = h * 3600 + m * 60 + s;
+    const targetSec  = 8 * 3600; // 8h00
+    const daysUntilMonday = isMonday ? 0 : ((1 - now.getDay() + 7) % 7 || 7);
+    let diffSec = daysUntilMonday * 86400 + (targetSec - elapsedSec);
+    if (diffSec <= 0) diffSec += 7 * 86400; // semaine prochaine
+    setTimeout(async () => {
+      await sendWeeklyGrowthReport();
+      scheduleWeeklyReport();
+    }, diffSec * 1000);
+  }
+  scheduleWeeklyReport();
 
   // 🔄 Minuit chaque jour : décrémente les dueInDays de toutes les charges
   function scheduleDailyDecrement() {
