@@ -1017,6 +1017,31 @@ client.on('clientReady', () => {
   // 📧 Toutes les 5 min : nouveaux emails
   setInterval(checkNewEmails, 5 * 60 * 1000);
 
+  // 🔄 Minuit chaque jour : décrémente les dueInDays de toutes les charges
+  function scheduleDailyDecrement() {
+    setTimeout(async () => {
+      try {
+        const fin = loadFinances();
+        let changed = false;
+        for (const expense of fin.expenses) {
+          if (expense.dueInDays > 0) {
+            expense.dueInDays = Math.max(0, expense.dueInDays - 1);
+            changed = true;
+          }
+          // Décrémente aussi les inDays des virements attendus
+        }
+        for (const inc of fin.balance.incoming) {
+          if (inc.inDays > 0) inc.inDays = Math.max(0, inc.inDays - 1);
+        }
+        // Supprime les virements reçus (inDays = 0 depuis la veille)
+        fin.balance.incoming = fin.balance.incoming.filter(i => i.inDays > 0);
+        if (changed) writeJSON(FINANCES_FILE, fin);
+      } catch (err) { console.error('[Daily decrement]', err.message); }
+      scheduleDailyDecrement();
+    }, msUntilNext(0, 1)); // 00h01 chaque nuit
+  }
+  scheduleDailyDecrement();
+
   // 💰 9h00 chaque matin : résumé financier dans #secrétaire (si charges urgentes)
   function scheduleFinanceDigest() {
     setTimeout(async () => {
