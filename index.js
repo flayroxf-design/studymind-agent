@@ -35,6 +35,7 @@ const conversations = new Map();
 const NOTES_FILE = path.join(__dirname, 'notes.json');
 const ALERTED_SUBS_FILE = path.join(__dirname, 'alerted-subs.json');
 const REMINDERS_FILE = path.join(__dirname, 'reminders.json');
+const FINANCES_FILE = path.join(__dirname, 'finances.json');
 
 function readJSON(file, defaultVal) {
   try {
@@ -624,6 +625,187 @@ async function checkNewSubscribers() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// FINANCES
+// ═══════════════════════════════════════════════════════════════
+
+function loadFinances() {
+  return readJSON(FINANCES_FILE, { balance: { current: 0, incoming: [] }, expenses: [] });
+}
+
+function euros(n) {
+  return n != null ? `${Number(n).toFixed(2)} €` : 'variable';
+}
+
+function urgencyDot(daysLeft) {
+  if (daysLeft <= 3)  return '🔴';
+  if (daysLeft <= 7)  return '🟠';
+  if (daysLeft <= 14) return '🟡';
+  return '🟢';
+}
+
+function estimatedBalance(fin) {
+  const incoming = fin.balance.incoming.reduce((s, i) => s + i.amount, 0);
+  const total    = fin.balance.current + incoming;
+  const fixed    = fin.expenses
+    .filter(e => e.amount != null && e.amount > 0 && e.dueInDays <= 30)
+    .reduce((s, e) => s + e.amount, 0);
+  return { total, fixed, remaining: total - fixed };
+}
+
+async function buildFinancesEmbed() {
+  const fin = loadFinances();
+  const bal = estimatedBalance(fin);
+
+  // Stripe revenue
+  let stripeData = null;
+  try { if (stripe) stripeData = await getStripeStats(); } catch { /* noop */ }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x3b82f6)
+    .setTitle('📊 StudyMind — Vue financière')
+    .setTimestamp()
+    .setFooter({ text: 'studymind.net' });
+
+  // Solde & entrées
+  const balLines = [
+    `Solde actuel : **${euros(fin.balance.current)}**`,
+    ...fin.balance.incoming.map(i => `+ ${euros(i.amount)} dans ${i.inDays}j _(${i.label})_`),
+    `\n**Total disponible : ${euros(bal.total)}**`,
+  ];
+  embed.addFields({ name: '💳 Solde & entrées', value: balLines.join('\n'), inline: false });
+
+  // Charges à venir (30 jours)
+  const chargesLines = fin.expenses
+    .filter(e => e.dueInDays <= 30 && e.amount > 0)
+    .sort((a, b) => a.dueInDays - b.dueInDays)
+    .map(e => `${urgencyDot(e.dueInDays)} ${e.icon} **${e.name}** — ${euros(e.amount)} (J+${e.dueInDays})`)
+    .join('\n');
+  embed.addFields({ name: '📋 Charges (30 prochains jours)', value: chargesLines || 'Aucune', inline: false });
+
+  // Stripe
+  if (stripeData) {
+    const mrrLine = `MRR : **${euros(stripeData.mrr)}** | ARR : **${euros(stripeData.arr)}**\nAbonnés actifs : **${stripeData.activeSubscriptions}** (${stripeData.monthlySubscriptions} mensuel, ${stripeData.annualSubscriptions} annuel)\nNouveaux ce mois : ${stripeData.newThisMonth}`;
+    embed.addFields({ name: '💰 Revenus Stripe', value: mrrLine, inline: false });
+  }
+
+  // Résultat
+  const rem = bal.remaining;
+  const remStatus = rem > 80 ? '✅ Confortable' : rem > 30 ? '⚠️ Marge faible' : '🚨 Budget serré';
+  embed.addFields({
+    name: '📈 Solde après charges fixes',
+    value: `**${euros(rem)}** — ${remStatus}`,
+    inline: false,
+  });
+
+  return embed;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SECRÉTAIRE FINANCIER — channel dédié
+// ═══════════════════════════════════════════════════════════════
+
+const SECRETAIRE_SYSTEM = `Tu es le secrétaire financier de Raphaël, fondateur de StudyMind (SaaS edtech).
+Tu gères ses finances personnelles liées au SaaS dans ce channel Discord dédié.
+
+**Tes données en temps réel (finances.json) :**
+- balance.current : solde actuel en euros
+- balance.incoming : virements attendus (label, amount, inDays)
+- expenses : charges mensuelles (name, icon, amount, dueInDays, billingCycle, note)
+
+**Charges connues du SaaS :**
+- Vercel Pro : 18€/mois (hébergement)
+- Claude API (Anthropic) : ~18€/mois (IA de l'app)
+- Google One : 22€/mois
+- Domaine studymind.net : 13€/an
+- Resend : gratuit (emails)
+- Railway Hobby : 5$/mois (hébergement bot Discord)
+- Revenues : Stripe Premium (6,99€/mois ou 69,99€/an par abonné)
+
+**Quand Raphaël te dit quelque chose, tu dois retourner un JSON UNIQUEMENT dans ce format :**
+{
+  "action": "update" | "status" | "respond",
+  "message": "ta réponse courte en français (max 3 phrases)",
+  "changes": {          // seulement si action = "update"
+    "balance_current": 50,         // nouveau solde (si mentionné)
+    "add_incoming": { "label": "...", "amount": 0, "inDays": 0 },  // si virement attendu
+    "clear_incoming": true,        // si on veut vider les entrées attendues
+    "update_expense": { "name": "...", "dueInDays": 0, "amount": 0 },  // si charge modifiée
+    "add_expense": { "name": "...", "icon": "💸", "amount": 0, "dueInDays": 0, "billingCycle": "mensuel", "note": "" },
+    "mark_paid": "NomDeLaCharge"   // remet dueInDays à 30 pour cette charge
+  },
+  "show_embed": true | false       // true si tu veux afficher le résumé financier complet
+}
+
+**Règles :**
+- "j'ai payé Vercel" → action update, mark_paid: "Vercel Pro", show_embed: true
+- "mon solde est 80€" → action update, balance_current: 80, show_embed: true
+- "j'attends 50€ vendredi" → action update, add_incoming avec inDays estimé, show_embed: false
+- "c'est quoi ma situation ?" → action status, show_embed: true
+- question/discussion → action respond, show_embed: false
+- Toujours analyser : est-ce qu'on est en positif après les charges du mois prochain ?
+- Répondre en français, tutoyer Raphaël, être direct et concis`;
+
+async function handleSecretaire(message, financesData, stripeData) {
+  const fin = financesData;
+  const bal = estimatedBalance(fin);
+
+  const context = `
+Données actuelles (finances.json) :
+- Solde : ${fin.balance.current}€
+- Entrées attendues : ${JSON.stringify(fin.balance.incoming)}
+- Charges : ${JSON.stringify(fin.expenses.map(e => ({ name: e.name, amount: e.amount, dueInDays: e.dueInDays })))}
+- Total disponible : ${bal.total}€
+- Total charges 30j : ${bal.fixed}€
+- Solde net estimé : ${bal.remaining}€
+${stripeData ? `- MRR Stripe : ${stripeData.mrr}€ | Abonnés actifs : ${stripeData.activeSubscriptions}` : ''}
+
+Message de Raphaël : "${message}"`;
+
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 600,
+    system: SECRETAIRE_SYSTEM,
+    messages: [{ role: 'user', content: context }],
+  });
+
+  const raw = response.content[0].text.trim()
+    .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+
+  return JSON.parse(raw);
+}
+
+function applyFinancesChanges(fin, changes) {
+  if (!changes) return fin;
+  const updated = JSON.parse(JSON.stringify(fin)); // deep copy
+
+  if (changes.balance_current !== undefined) {
+    updated.balance.current = changes.balance_current;
+  }
+  if (changes.add_incoming) {
+    updated.balance.incoming.push(changes.add_incoming);
+  }
+  if (changes.clear_incoming) {
+    updated.balance.incoming = [];
+  }
+  if (changes.update_expense) {
+    const exp = updated.expenses.find(e => e.name.toLowerCase().includes(changes.update_expense.name.toLowerCase()));
+    if (exp) {
+      if (changes.update_expense.dueInDays !== undefined) exp.dueInDays = changes.update_expense.dueInDays;
+      if (changes.update_expense.amount !== undefined) exp.amount = changes.update_expense.amount;
+    }
+  }
+  if (changes.add_expense) {
+    updated.expenses.push(changes.add_expense);
+  }
+  if (changes.mark_paid) {
+    const exp = updated.expenses.find(e => e.name.toLowerCase().includes(changes.mark_paid.toLowerCase()));
+    if (exp) exp.dueInDays = 30; // remis à 30 jours
+  }
+
+  return updated;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // INTENT DETECTION
 // ═══════════════════════════════════════════════════════════════
 
@@ -634,6 +816,8 @@ function detectIntent(text) {
   if (t === '!rapport' || t.startsWith('!rapport ')) return 'report';
   if (['!agenda', '!rappels', '!calendrier'].includes(t)) return 'agenda';
   if (t === '!notes') return 'notes_view';
+  if (['!finances', '!finance', '!budget', '!charges', '!depenses', '!dépenses'].includes(t)) return 'finances';
+  if (['!solde', '!cashflow', '!tresorerie', '!trésorerie'].includes(t)) return 'solde';
 
   const statsKw = ['mrr', 'arr', 'chiffre d\'affaires', 'combien d\'abonnés', 'combien d\'inscrits', 'dashboard', 'kpi', 'mes stats', 'mes métriques'];
   if (statsKw.some(k => t.includes(k))) return 'stats';
@@ -722,6 +906,8 @@ const SYSTEM_PROMPT = `Tu es l'agent IA de Raphaël — son co-fondateur virtuel
 !rapport → rapport mensuel des paiements
 !agenda → prochains rappels calendrier (7 jours)
 !notes → tes notes sauvegardées
+!finances → vue complète : solde, charges, revenus Stripe
+!solde → solde rapide après charges
 
 ---
 
@@ -819,10 +1005,91 @@ client.on('clientReady', () => {
 
   // 📧 Toutes les 5 min : nouveaux emails
   setInterval(checkNewEmails, 5 * 60 * 1000);
+
+  // 💰 9h00 chaque matin : résumé financier dans #secrétaire (si charges urgentes)
+  function scheduleFinanceDigest() {
+    setTimeout(async () => {
+      const channelId = process.env.SECRETAIRE_CHANNEL_ID;
+      if (channelId) {
+        try {
+          const fin = loadFinances();
+          const urgent = fin.expenses.filter(e => e.amount > 0 && e.dueInDays <= 7);
+          const bal = estimatedBalance(fin);
+
+          if (urgent.length > 0 || bal.remaining < 30) {
+            const channel = await client.channels.fetch(channelId).catch(() => null);
+            if (!channel) return;
+
+            const lines = urgent.map(e =>
+              `${urgencyDot(e.dueInDays)} **${e.name}** — ${euros(e.amount)} dans **${e.dueInDays} jour(s)**`
+            );
+
+            const embed = new EmbedBuilder()
+              .setColor(bal.remaining < 30 ? 0xef4444 : 0xf59e0b)
+              .setTitle('🔔 Rappel financier du matin')
+              .setTimestamp();
+
+            if (urgent.length > 0) {
+              embed.addFields({ name: '⚠️ Charges à venir', value: lines.join('\n'), inline: false });
+            }
+            embed.addFields({
+              name: '💳 Solde net estimé',
+              value: `**${euros(bal.remaining)}** ${bal.remaining > 30 ? '✅' : '🚨'}`,
+              inline: false,
+            });
+
+            await channel.send({ embeds: [embed] });
+          }
+        } catch (err) { console.error('[Finance digest]', err.message); }
+      }
+      scheduleFinanceDigest();
+    }, msUntilNext(9, 0));
+  }
+  scheduleFinanceDigest();
 });
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // ══════════════════════════════════════════
+  // CANAL SECRÉTAIRE FINANCIER
+  // ══════════════════════════════════════════
+  if (process.env.SECRETAIRE_CHANNEL_ID && message.channel.id === process.env.SECRETAIRE_CHANNEL_ID) {
+    await message.channel.sendTyping();
+    try {
+      const fin = loadFinances();
+      let stripeData = null;
+      try { if (stripe) stripeData = await getStripeStats(); } catch { /* noop */ }
+
+      const result = await handleSecretaire(message.content, fin, stripeData);
+
+      // Appliquer les changements si nécessaire
+      if (result.action === 'update' && result.changes) {
+        const updated = applyFinancesChanges(fin, result.changes);
+        writeJSON(FINANCES_FILE, updated);
+      }
+
+      // Envoyer la réponse texte
+      if (result.message) {
+        await message.reply(result.message);
+      }
+
+      // Envoyer l'embed financier complet si demandé
+      if (result.show_embed) {
+        const embed = await buildFinancesEmbed();
+        await message.channel.send({ embeds: [embed] });
+      }
+
+    } catch (err) {
+      console.error('[Secrétaire]', err.message);
+      await message.reply('❌ Erreur secrétaire : ' + err.message);
+    }
+    return;
+  }
+
+  // ══════════════════════════════════════════
+  // CANAL AGENT PRINCIPAL
+  // ══════════════════════════════════════════
   if (message.channel.id !== process.env.AGENT_CHANNEL_ID) return;
 
   const history = conversations.get(message.channel.id) ?? [];
@@ -882,6 +1149,36 @@ client.on('messageCreate', async (message) => {
       } catch (err) {
         await message.reply('❌ Impossible de récupérer l\'agenda : ' + err.message);
       }
+      return;
+    }
+
+    // ── Finances
+    if (intent === 'finances') {
+      try {
+        const embed = await buildFinancesEmbed();
+        await message.reply({ embeds: [embed] });
+      } catch (err) {
+        await message.reply('❌ Erreur finances : ' + err.message);
+      }
+      return;
+    }
+
+    // ── Solde rapide
+    if (intent === 'solde') {
+      const fin = loadFinances();
+      const bal = estimatedBalance(fin);
+      const rem = bal.remaining;
+      const status = rem > 80 ? '✅' : rem > 30 ? '⚠️' : '🚨';
+      const embed = new EmbedBuilder()
+        .setColor(rem > 80 ? 0x10b981 : rem > 30 ? 0xf59e0b : 0xef4444)
+        .setTitle('💳 Solde rapide')
+        .addFields(
+          { name: 'Disponible total',    value: euros(bal.total),     inline: true },
+          { name: 'Charges fixes (30j)', value: euros(bal.fixed),     inline: true },
+          { name: 'Reste estimé',        value: `**${euros(rem)}** ${status}`, inline: true },
+        )
+        .setTimestamp();
+      await message.reply({ embeds: [embed] });
       return;
     }
 

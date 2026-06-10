@@ -1,0 +1,53 @@
+{
+  "_note": "Met à jour balance.current chaque semaine. dueInDays = jours avant la prochaine échéance.",
+  "balance": {
+    "current": 50,
+    "incoming": [
+      { "label": "Virement #1", "amount": 70, "inDays": 1 },
+      { "label": "Virement #2", "amount": 3, "inDays": 3 },
+      { "label": "Virement #3", "amount": 18, "inDays": 4 }
+    ]
+  },
+  "expenses": [
+    {
+      "name": "Vercel Pro",
+      "icon": "☁️",
+      "amount": 18,
+      "dueInDays": 7,
+      "billingCycle": "mensuel",
+      "note": "Hébergement Next.js + Cron jobs"
+    },
+    {
+      "name": "Claude (Anthropic API)",
+      "icon": "🤖",
+      "amount": 18,
+      "dueInDays": 12,
+      "billingCycle": "mensuel",
+      "note": "API utilisée par les fonctionnalités IA de l'app"
+    },
+    {
+      "name": "Google One",
+      "icon": "☁️",
+      "amount": 22,
+      "dueInDays": 13,
+      "billingCycle": "mensuel",
+      "note": "Stockage Google"
+    },
+    {
+      "name": "Domaine studymind.net",
+      "icon": "🌐",
+      "amount": 13,
+      "dueInDays": 355,
+      "billingCycle": "annuel",
+      "note": "Renouvellement annuel domaine"
+    },
+    {
+      "name": "Resend (emails)",
+      "icon": "📧",
+      "amount": 0,
+      "dueInDays": 999,
+      "billingCycle": "gratuit",
+      "note": "Tier gratuit — 3 000 emails/mois. Surveille la consommation."
+    }
+  ]
+}
