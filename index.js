@@ -705,14 +705,17 @@ async function buildFinancesEmbed() {
     const daysLeft = api.estimatedDailyBurn > 0
       ? Math.floor(api.balance / api.estimatedDailyBurn)
       : 99;
+    const autoRechargeInfo = api.autoRecharge
+      ? `🔄 Auto-recharge activée : quand < $${api.autoRechargeFrom} → prélèvement $${api.autoRechargeAmount} → retour à $${api.autoRechargeTo}`
+      : `_Recharger manuellement sur console.anthropic.com_`;
     const apiStatus = api.balance < api.alertThreshold
-      ? '🚨 RECHARGER MAINTENANT'
+      ? (api.autoRecharge ? '🔄 Recharge automatique imminente' : '🚨 RECHARGER MAINTENANT')
       : api.balance < api.alertThreshold * 2
       ? '⚠️ Bientôt vide'
       : '✅ OK';
     embed.addFields({
       name: '🤖 Crédits Anthropic API',
-      value: `Solde : **${euros(api.balance)}** — ${apiStatus}\nBurn estimé : ~${euros(api.estimatedDailyBurn)}/jour → **${daysLeft} jours** restants\nSeuil d'alerte : ${euros(api.alertThreshold)} | _Recharger sur console.anthropic.com_`,
+      value: `Solde : **$${api.balance.toFixed(2)}** — ${apiStatus}\nBurn estimé : ~$${api.estimatedDailyBurn}/jour → **${daysLeft} jours** restants\n${autoRechargeInfo}`,
       inline: false,
     });
   }
@@ -935,7 +938,13 @@ Tu gères ses finances personnelles liées au SaaS dans ce channel Discord dédi
 - "j'ai rechargé 20€ sur Anthropic/Claude" → action update, recharge_anthropic: 20, show_embed: true
 - question/discussion → action respond, show_embed: false
 - Toujours analyser : est-ce qu'on est en positif après les charges du mois prochain ?
-- Répondre en français, tutoyer Raphaël, être direct et concis`;
+- Répondre en français, tutoyer Raphaël, être direct et concis
+
+IMPORTANT — Anthropic API auto-recharge activée :
+Le rechargement Anthropic est AUTOMATIQUE depuis le 14/06/2026 (configuré sur console.anthropic.com).
+Seuil : quand solde < 5$ → prélèvement automatique de 15$ → retour à 20$.
+Raphaël N'A PLUS BESOIN de te signaler manuellement une recharge Anthropic — le bot le détecte et notifie seul.
+Si Raphaël mentionne "Claude m'a pris 15$" ou "recharge Anthropic", réponds que c'est normal et géré automatiquement.`;
 
 async function handleSecretaire(message, financesData, stripeData) {
   const fin = financesData;
@@ -1284,18 +1293,34 @@ client.on('clientReady', () => {
           fin.apiCredits.anthropic.balance = Math.round(fin.apiCredits.anthropic.balance * 100) / 100;
           changed = true;
 
-          // Alerte si balance < seuil
           const api = fin.apiCredits.anthropic;
-          if (api.balance < api.alertThreshold) {
+
+          // Auto-recharge activée : quand le solde atteint le seuil, Claude prélève automatiquement
+          if (api.autoRecharge && api.balance <= api.alertThreshold) {
+            const before = api.balance;
+            api.balance = api.autoRechargeTo ?? 20.00;
+            api.lastRecharge = new Date().toISOString().slice(0, 10);
+            const channelId = process.env.SECRETAIRE_CHANNEL_ID;
+            if (channelId) {
+              try {
+                const ch = await client.channels.fetch(channelId);
+                if (ch) await ch.send(
+                  `🔄 **Rechargement Anthropic API automatique**\n\n` +
+                  `Solde était : **$${before.toFixed(2)}** → recharge de **$${api.autoRechargeAmount ?? 15}** → nouveau solde : **$${api.balance.toFixed(2)}**\n` +
+                  `_(Anthropic a prélevé $${api.autoRechargeAmount ?? 15} sur ta carte automatiquement — aucune action requise)_`
+                );
+              } catch (e) { console.error('[Anthropic auto-recharge notify]', e.message); }
+            }
+          } else if (!api.autoRecharge && api.balance < api.alertThreshold) {
+            // Pas d'auto-recharge : alerte manuelle
             const channelId = process.env.SECRETAIRE_CHANNEL_ID;
             if (channelId) {
               try {
                 const ch = await client.channels.fetch(channelId);
                 if (ch) await ch.send(
                   `🚨 **Alerte Anthropic API** — Crédits bas !\n\n` +
-                  `Solde actuel : **${euros(api.balance)}** (seuil : ${euros(api.alertThreshold)})\n` +
-                  `Recharger sur → https://console.anthropic.com/settings/billing\n` +
-                  `_(Dis-moi "j'ai rechargé 20€ sur Anthropic" quand c'est fait)_`
+                  `Solde actuel : **$${api.balance.toFixed(2)}** (seuil : $${api.alertThreshold})\n` +
+                  `Recharger sur → https://console.anthropic.com/settings/billing`
                 );
               } catch (e) { console.error('[Anthropic alert]', e.message); }
             }

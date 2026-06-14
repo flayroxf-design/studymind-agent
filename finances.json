@@ -59,11 +59,15 @@
   ],
   "apiCredits": {
     "anthropic": {
-      "balance": 20.00,
+      "balance": 6.29,
       "alertThreshold": 5.00,
-      "lastRecharge": "2026-06-10",
+      "autoRecharge": true,
+      "autoRechargeFrom": 5.00,
+      "autoRechargeTo": 20.00,
+      "autoRechargeAmount": 15.00,
+      "lastRecharge": "2026-06-14",
       "estimatedDailyBurn": 0.80,
-      "note": "Recharger par tranches de 20€ sur console.anthropic.com. Alerte automatique quand < 5€."
+      "note": "Rechargement automatique activé : quand le solde atteint 5$, Claude prélève 15$ pour revenir à 20$. Aucune action manuelle requise."
     }
   }
 }
